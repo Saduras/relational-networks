@@ -38,6 +38,8 @@ parser.add_argument('--resume', type=str,
                     help='resume from model stored')
 parser.add_argument('--relation-type', type=str, default='binary',
                     help='what kind of relations to learn. options: binary, ternary (default: binary)')
+parser.add_argument('--log-subtypes', action='store_true', default=False,
+                    help='Split loss and accuracy by subtype for tensorboard logging')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -88,78 +90,112 @@ def cvt_data_axis(data):
     return (img,qst,ans)
 
     
-def train(epoch, ternary, rel, norel):
+def train(epoch, ternary_full, binary_full, unary_full):
     model.train()
 
-    if not len(rel[0]) == len(norel[0]):
+    if not len(binary_full[0]) == len(unary_full[0]):
         print('Not equal length for relation dataset and non-relation dataset.')
         return
     
-    random.shuffle(ternary)
-    random.shuffle(rel)
-    random.shuffle(norel)
+    random.shuffle(ternary_full)
+    random.shuffle(binary_full)
+    random.shuffle(unary_full)
 
-    ternary = cvt_data_axis(ternary)
-    rel = cvt_data_axis(rel)
-    norel = cvt_data_axis(norel)
+    # split data set by type
+    split_ternary = []
+    split_binary = []
+    split_unary = []
+    for qst_subtype in range(3):
+        split_ternary.append([])
+        split_binary.append([])
+        split_unary.append([])
+        for j in range(len(ternary_full)):
+            if np.argmax(ternary_full[j][1][-3:]) == qst_subtype:
+                split_ternary[qst_subtype].append(ternary_full[j])
+            if np.argmax(binary_full[j][1][-3:]) == qst_subtype:
+                split_binary[qst_subtype].append(binary_full[j])
+            if np.argmax(unary_full[j][1][-3:]) == qst_subtype:
+                split_unary[qst_subtype].append(unary_full[j])
+            
+    # cut the length of shortest sub-type
+    max_idx = min(map(len, split_ternary + split_binary + split_unary))
+    for qst_subtype in range(3):
+        split_ternary[qst_subtype] = split_ternary[qst_subtype][:max_idx]
+        split_binary[qst_subtype] = split_binary[qst_subtype][:max_idx]
+        split_unary[qst_subtype] = split_unary[qst_subtype][:max_idx]
 
-    acc_ternary = []
-    acc_rels = []
-    acc_norels = []
+    all_acc_ternary = []
+    all_acc_binary = []
+    all_acc_unary = []
 
-    l_ternary = []
-    l_binary = []
-    l_unary = []
+    for qst_subtype in range(3):
+        ternary = cvt_data_axis(split_ternary[qst_subtype])
+        binary = cvt_data_axis(split_binary[qst_subtype])
+        unary = cvt_data_axis(split_unary[qst_subtype])
 
-    for batch_idx in range(len(rel[0]) // bs):
-        tensor_data(ternary, batch_idx)
-        accuracy_ternary, loss_ternary = model.train_(input_img, input_qst, label)
-        acc_ternary.append(accuracy_ternary.item())
-        l_ternary.append(loss_ternary.item())
+        acc_ternary = []
+        acc_binary = []
+        acc_unary = []
 
-        tensor_data(rel, batch_idx)
-        accuracy_rel, loss_binary = model.train_(input_img, input_qst, label)
-        acc_rels.append(accuracy_rel.item())
-        l_binary.append(loss_binary.item())
+        l_ternary = []
+        l_binary = []
+        l_unary = []
 
-        tensor_data(norel, batch_idx)
-        accuracy_norel, loss_unary = model.train_(input_img, input_qst, label)
-        acc_norels.append(accuracy_norel.item())
-        l_unary.append(loss_unary.item())
+        for batch_idx in range(10):  #range(len(binary[0]) // bs):
+            tensor_data(ternary, batch_idx)
+            accuracy_ternary, loss_ternary = model.train_(input_img, input_qst, label)
+            acc_ternary.append(accuracy_ternary.item())
+            l_ternary.append(loss_ternary.item())
 
-        if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)] '
-                  'Ternary accuracy: {:.0f}% | Relations accuracy: {:.0f}% | Non-relations accuracy: {:.0f}%'.format(
-                   epoch,
-                   batch_idx * bs * 2,
-                   len(rel[0]) * 2,
-                   100. * batch_idx * bs / len(rel[0]),
-                   accuracy_ternary,
-                   accuracy_rel,
-                   accuracy_norel))
-        
-    avg_acc_ternary = sum(acc_ternary) / len(acc_ternary)
-    avg_acc_binary = sum(acc_rels) / len(acc_rels)
-    avg_acc_unary = sum(acc_norels) / len(acc_norels)
+            tensor_data(binary, batch_idx)
+            accuracy_binary, loss_binary = model.train_(input_img, input_qst, label)
+            acc_binary.append(accuracy_binary.item())
+            l_binary.append(loss_binary.item())
 
-    summary_writer.add_scalars('Accuracy/train', {
-        'ternary': avg_acc_ternary,
-        'binary': avg_acc_binary,
-        'unary': avg_acc_unary
-    }, epoch)
+            tensor_data(unary, batch_idx)
+            accuracy_unary, loss_unary = model.train_(input_img, input_qst, label)
+            acc_unary.append(accuracy_unary.item())
+            l_unary.append(loss_unary.item())
 
-    avg_loss_ternary = sum(l_ternary) / len(l_ternary)
-    avg_loss_binary = sum(l_binary) / len(l_binary)
-    avg_loss_unary = sum(l_unary) / len(l_unary)
+            if batch_idx % args.log_interval == 0:
+                print('Train Epoch: {} [{}/{} ({:.0f}%)] Type {} '
+                        'Ternary accuracy: {:.0f}% | Binary accuracy: {:.0f}% | Unary accuracy: {:.0f}%'.format(
+                        epoch,
+                        batch_idx * bs * 2,
+                        len(binary[0]) * 2,
+                        100. *batch_idx*bs / len(binary[0]),
+                        qst_subtype,
+                        accuracy_ternary,
+                        accuracy_binary,
+                        accuracy_unary))
+            
+        avg_acc_ternary = sum(acc_ternary) / len(acc_ternary)
+        avg_acc_binary = sum(acc_binary) / len(acc_binary)
+        avg_acc_unary = sum(acc_unary) / len(acc_unary)
 
-    summary_writer.add_scalars('Loss/train', {
-        'ternary': avg_loss_ternary,
-        'binary': avg_loss_binary,
-        'unary': avg_loss_unary
-    }, epoch)
+        all_acc_ternary.append(avg_acc_ternary)
+        all_acc_binary.append(avg_acc_binary)
+        all_acc_unary.append(avg_acc_unary)
 
-    # return average accuracy
-    return avg_acc_ternary, avg_acc_binary, avg_acc_unary
+        summary_writer.add_scalars(f'Accuracy/train_type{qst_subtype}', {
+            'ternary': avg_acc_ternary,
+            'binary': avg_acc_binary,
+            'unary': avg_acc_unary
+        }, epoch)
+
+        avg_loss_ternary = sum(l_ternary) / len(l_ternary)
+        avg_loss_binary = sum(l_binary) / len(l_binary)
+        avg_loss_unary = sum(l_unary) / len(l_unary)
+
+        summary_writer.add_scalars(f'Accuracy/train_type{qst_subtype}', {
+            'ternary': avg_loss_ternary,
+            'binary': avg_loss_binary,
+            'unary': avg_loss_unary
+        }, epoch)
+
+    return sum(all_acc_ternary) / len(all_acc_ternary), \
+        sum(all_acc_binary) / len(all_acc_binary), \
+        sum(all_acc_unary) / len(all_acc_unary)
 
 def test(epoch, ternary, rel, norel):
     model.eval()
